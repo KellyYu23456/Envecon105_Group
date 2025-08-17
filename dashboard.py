@@ -146,16 +146,6 @@ def normalize_year_and_numeric(df):
 
 temp_cn, year_col, num_cols = normalize_year_and_numeric(temp_cn)
 
-# Guard rails: stop with a useful message if we still can't find it
-if year_col is None:
-    st.error("Temperature file doesn’t contain a 'Year' column (case-insensitive). "
-             "Please check the sheet/headers in temp_mean_china_cru_1901-2024.xlsx.")
-    st.stop()
-
-# Now safely subset
-tmp = temp_cn[[year_col] + num_cols].copy()
-tmp = tmp.rename(columns={year_col: "Year"})
-
     # Collapse to one numeric series (mean across numeric columns)
     tmp["Temperature_C"] = tmp[num_cols].mean(axis=1, skipna=True)
     temperature_cn = tmp[["Year", "Temperature_C"]].dropna().copy()
