@@ -384,11 +384,3 @@ st.caption("""
 - Temperature data for China converted °C → °F and collapsed to an annual mean.
 - GDP growth and Energy use are from World Bank (zip packages).
 """)
-
-streamlit
-pandas
-numpy
-requests
-plotly
-matplotlib
-scikit-learn
