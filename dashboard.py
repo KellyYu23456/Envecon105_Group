@@ -1,6 +1,5 @@
 # dashboard.py
 # Streamlit Dashboard for Envecon105 – Group + Individual Results
-# ---------------------------------------------------------------
 # Data sources are read directly from your public GitHub repository.
 
 import io
