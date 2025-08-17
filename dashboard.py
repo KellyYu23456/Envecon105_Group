@@ -147,7 +147,7 @@ def normalize_year_and_numeric(df):
 temp_cn, year_col, num_cols = normalize_year_and_numeric(temp_cn)
 
     # Collapse to one numeric series (mean across numeric columns)
-    tmp["Temperature_C"] = tmp[num_cols].mean(axis=1, skipna=True)
+  tmp["Temperature_C"] = tmp[num_cols].mean(axis=1, skipna=True)
     temperature_cn = tmp[["Year", "Temperature_C"]].dropna().copy()
     temperature_cn["Country"] = "China"
     temperature_cn["Indicator"] = "Temperature"
