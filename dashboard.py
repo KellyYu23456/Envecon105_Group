@@ -115,7 +115,47 @@ with st.spinner("Loading data from GitHub…"):
     # Reduce to Year + a single 'Temperature' column in °F for your charts
     temp_cn = temp_cn.dropna(axis=1, how="all")
     num_cols = [c for c in temp_cn.columns if c != "Year" and pd.api.types.is_numeric_dtype(temp_cn[c])]
-    tmp = temp_cn[["Year"] + num_cols].copy()
+    # --- robust normalizer for the temperature table ---
+def normalize_year_and_numeric(df):
+    # 1) normalize column names
+    df = df.rename(columns=lambda c: str(c).strip())
+
+    # 2) if year is in the index, bring it back as a column
+    if df.index.name and "year" in str(df.index.name).lower():
+        df = df.reset_index()
+
+    # 3) find the 'year' column case/space-insensitively
+    year_col = None
+    for c in df.columns:
+        if "year" in c.lower():
+            year_col = c
+            break
+
+    # 4) coerce numerics (sometimes read as object)
+    for c in df.columns:
+        if c != year_col:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # 5) choose a reasonable numeric temp column if you only want one
+    #    (or keep them all if your chart expects multiple)
+    numeric_cols = df.select_dtypes(include="number").columns.tolist()
+    if year_col and year_col in numeric_cols:
+        numeric_cols.remove(year_col)
+
+    return df, year_col, numeric_cols
+
+temp_cn, year_col, num_cols = normalize_year_and_numeric(temp_cn)
+
+# Guard rails: stop with a useful message if we still can't find it
+if year_col is None:
+    st.error("Temperature file doesn’t contain a 'Year' column (case-insensitive). "
+             "Please check the sheet/headers in temp_mean_china_cru_1901-2024.xlsx.")
+    st.stop()
+
+# Now safely subset
+tmp = temp_cn[[year_col] + num_cols].copy()
+tmp = tmp.rename(columns={year_col: "Year"})
+
     # Collapse to one numeric series (mean across numeric columns)
     tmp["Temperature_C"] = tmp[num_cols].mean(axis=1, skipna=True)
     temperature_cn = tmp[["Year", "Temperature_C"]].dropna().copy()
