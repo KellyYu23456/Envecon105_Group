@@ -1,4 +1,4 @@
-# main.py
+main.py
 # Streamlit Dashboard for Envecon105 – Group + Individual Results
 # ---------------------------------------------------------------
 # Data sources are read directly from your public GitHub repository.
@@ -355,3 +355,11 @@ st.caption("""
 - Temperature data for China converted °C → °F and collapsed to an annual mean.
 - GDP growth and Energy use are from World Bank (zip packages).
 """)
+
+streamlit
+pandas
+numpy
+requests
+plotly
+matplotlib
+scikit-learn
