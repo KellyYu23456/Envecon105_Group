@@ -147,13 +147,13 @@ def normalize_year_and_numeric(df):
 temp_cn, year_col, num_cols = normalize_year_and_numeric(temp_cn)
 
     # Collapse to one numeric series (mean across numeric columns)
-  tmp["Temperature_C"] = tmp[num_cols].mean(axis=1, skipna=True)
-    temperature_cn = tmp[["Year", "Temperature_C"]].dropna().copy()
-    temperature_cn["Country"] = "China"
-    temperature_cn["Indicator"] = "Temperature"
+tmp["Temperature_C"] = tmp[num_cols].mean(axis=1, skipna=True)
+temperature_cn = tmp[["Year", "Temperature_C"]].dropna().copy()
+temperature_cn["Country"] = "China"
+temperature_cn["Indicator"] = "Temperature"
     # Convert °C -> °F to match your individual notebook visuals
-    temperature_cn["Value"] = temperature_cn["Temperature_C"] * 9 / 5 + 32
-    temperature_cn = temperature_cn[["Country", "Year", "Indicator", "Value"]]
+temperature_cn["Value"] = temperature_cn["Temperature_C"] * 9 / 5 + 32
+temperature_cn = temperature_cn[["Country", "Year", "Indicator", "Value"]]
 
     # China natural disasters (counts)
     dis_cn_raw = read_excel_from_url(RAW_URLS["disasters_xlsx"])
