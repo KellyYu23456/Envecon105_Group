@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import requests
-import matplotlib.pyplot as plt
 import plotly.express as px
 
 st.set_page_config(page_title="Envecon105 – CO₂, Energy, GDP & Temperature",
@@ -57,7 +56,7 @@ def read_zip_worldbank_csv(url, indicator_guess=None, skiprows=3) -> pd.DataFram
     # World Bank format typically has these columns
     # ['Country Name','Country Code','Indicator Name','Indicator Code','1960','1961',...]
     # melt to long
-    year_cols = [c for c in df.columns if c.isdigit()]
+    year_cols = [c for c in df.columns if str(c).isdigit()]
     long_df = df.melt(id_vars=["Country Name", "Country Code", "Indicator Name", "Indicator Code"],
                       value_vars=year_cols, var_name="Year", value_name="Value")
     long_df["Year"] = pd.to_numeric(long_df["Year"], errors="coerce")
@@ -103,70 +102,69 @@ with st.spinner("Loading data from GitHub…"):
     # China temperature (°C) – Excel with metadata rows
     # Your notebook used skiprows=4 and na_values=["-99"]
     temp_cn = read_excel_from_url(RAW_URLS["temp_xlsx"], skiprows=4, na_values=["-99"])
+
     # We expect columns like 'Year', 'China' or a single annual mean series.
-    # Try to auto-detect a temperature column:
-    # Keep numeric columns except Year, then sum across if needed (robust fallback)
-    if "Year" not in temp_cn.columns:
-        # Some files label it 'year' or similar
-        possible_year = [c for c in temp_cn.columns if str(c).strip().lower() == "year"]
-        if possible_year:
-            temp_cn.rename(columns={possible_year[0]: "Year"}, inplace=True)
-
-    # Reduce to Year + a single 'Temperature' column in °F for your charts
+    # Try to auto-detect a temperature column and standardize types.
     temp_cn = temp_cn.dropna(axis=1, how="all")
-    num_cols = [c for c in temp_cn.columns if c != "Year" and pd.api.types.is_numeric_dtype(temp_cn[c])]
-    # --- robust normalizer for the temperature table ---
-def normalize_year_and_numeric(df):
-    # 1) normalize column names
-    df = df.rename(columns=lambda c: str(c).strip())
 
-    # 2) if year is in the index, bring it back as a column
-    if df.index.name and "year" in str(df.index.name).lower():
-        df = df.reset_index()
+    def normalize_year_and_numeric(df: pd.DataFrame):
+        # 1) normalize column names
+        df = df.rename(columns=lambda c: str(c).strip())
 
-    # 3) find the 'year' column case/space-insensitively
-    year_col = None
-    for c in df.columns:
-        if "year" in c.lower():
-            year_col = c
-            break
+        # 2) if year is in the index, bring it back as a column
+        if df.index.name and "year" in str(df.index.name).lower():
+            df = df.reset_index()
 
-    # 4) coerce numerics (sometimes read as object)
-    for c in df.columns:
-        if c != year_col:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+        # 3) find the 'year' column case/space-insensitively
+        year_col = None
+        for c in df.columns:
+            if "year" in c.lower():
+                year_col = c
+                break
 
-    # 5) choose a reasonable numeric temp column if you only want one
-    #    (or keep them all if your chart expects multiple)
-    numeric_cols = df.select_dtypes(include="number").columns.tolist()
-    if year_col and year_col in numeric_cols:
-        numeric_cols.remove(year_col)
+        # if still not found, try common variants
+        if year_col is None and "Year" in df.columns:
+            year_col = "Year"
 
-    return df, year_col, numeric_cols
+        # 4) coerce numerics (sometimes read as object)
+        for c in df.columns:
+            if c != year_col:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
 
-temp_cn, year_col, num_cols = normalize_year_and_numeric(temp_cn)
+        # 5) choose numeric columns (excluding the year col)
+        numeric_cols = df.select_dtypes(include="number").columns.tolist()
+        if year_col and year_col in numeric_cols:
+            numeric_cols.remove(year_col)
 
-    # Collapse to one numeric series (mean across numeric columns)
-tmp["Temperature_C"] = tmp[num_cols].mean(axis=1, skipna=True)
-temperature_cn = tmp[["Year", "Temperature_C"]].dropna().copy()
-temperature_cn["Country"] = "China"
-temperature_cn["Indicator"] = "Temperature"
-    # Convert °C -> °F to match your individual notebook visuals
-temperature_cn["Value"] = temperature_cn["Temperature_C"] * 9 / 5 + 32
-temperature_cn = temperature_cn[["Country", "Year", "Indicator", "Value"]]
+        return df, year_col, numeric_cols
+
+    temp_cn, year_col, num_cols = normalize_year_and_numeric(temp_cn)
+
+    # Collapse to one numeric series (mean across numeric columns) → Temperature_C
+    if year_col is None or not num_cols:
+        # Fallback to empty if structure is unexpected
+        temperature_cn = pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
+    else:
+        tmp = temp_cn[[year_col] + num_cols].copy()
+        tmp["Temperature_C"] = tmp[num_cols].mean(axis=1, skipna=True)
+        temperature_cn = tmp[[year_col, "Temperature_C"]].dropna().copy()
+        temperature_cn.rename(columns={year_col: "Year"}, inplace=True)
+        temperature_cn["Country"] = "China"
+        temperature_cn["Indicator"] = "Temperature"
+        # Convert °C -> °F to match prior visuals
+        temperature_cn["Value"] = temperature_cn["Temperature_C"] * 9 / 5 + 32
+        temperature_cn = temperature_cn[["Country", "Year", "Indicator", "Value"]]
 
     # China natural disasters (counts)
     dis_cn_raw = read_excel_from_url(RAW_URLS["disasters_xlsx"])
-    # Try to find 'Year' and collapse various disaster types to total counts
     dis_cn = dis_cn_raw.copy()
     if "Year" not in dis_cn.columns:
         maybe_year = [c for c in dis_cn.columns if str(c).strip().lower() == "year"]
         if maybe_year:
             dis_cn.rename(columns={maybe_year[0]: "Year"}, inplace=True)
-
-    num_cols = [c for c in dis_cn.columns if c != "Year" and pd.api.types.is_numeric_dtype(dis_cn[c])]
-    if "Year" in dis_cn.columns and num_cols:
-        dis_cn["Value"] = dis_cn[num_cols].sum(axis=1, skipna=True)
+    num_cols_dis = [c for c in dis_cn.columns if c != "Year" and pd.api.types.is_numeric_dtype(dis_cn[c])]
+    if "Year" in dis_cn.columns and num_cols_dis:
+        dis_cn["Value"] = dis_cn[num_cols_dis].sum(axis=1, skipna=True)
         disasters_cn = dis_cn[["Year", "Value"]].dropna().copy()
         disasters_cn["Country"] = "China"
         disasters_cn["Indicator"] = "Disasters"
@@ -191,10 +189,10 @@ data_long["Region"] = np.where(data_long["Country"] == "China", "China", "Rest o
 # 3) Sidebar controls
 # -------------------------------
 countries = sorted(co2_long["Country"].dropna().unique().tolist())
-default_country = "China" if "China" in countries else countries[0]
+default_country = "China" if "China" in countries else (countries[0] if countries else "China")
 
 st.sidebar.header("Controls")
-focus_country = st.sidebar.selectbox("Country focus", countries, index=countries.index(default_country))
+focus_country = st.sidebar.selectbox("Country focus", countries, index=countries.index(default_country) if default_country in countries else 0)
 yr_min, yr_max = int(data_long["Year"].min()), int(data_long["Year"].max())
 year_range = st.sidebar.slider("Year range", min_value=yr_min, max_value=yr_max, value=(max(1900, yr_min), yr_max), step=1)
 
@@ -302,18 +300,14 @@ with tab3:
         ser = merged[["Year", "Emissions"]].set_index("Year").sort_index()
         if show_smoothed and window > 1:
             ser["Smoothed"] = ser["Emissions"].rolling(window, center=True, min_periods=1).mean()
-            st.line_chart(ser)
-        else:
-            st.line_chart(ser)
+        st.line_chart(ser)
 
     with col2:
         st.markdown("#### Temperature (°F, China)")
         ser = merged[["Year", "Temperature_F"]].set_index("Year").sort_index()
         if show_smoothed and window > 1:
             ser["Smoothed"] = ser["Temperature_F"].rolling(window, center=True, min_periods=1).mean()
-            st.line_chart(ser)
-        else:
-            st.line_chart(ser)
+        st.line_chart(ser)
 
     # Scatter: scaled emissions vs temperature (like your individual project)
     st.markdown("### Scaled Temperature vs CO₂ Emissions (China)")
@@ -345,11 +339,6 @@ with tab3:
                           labels={"Total": "Total CO₂ (metric tons)",
                                   "PerCapita": "CO₂ per Capita (tonnes/person)"},
                           title="China: CO₂ Total vs CO₂ per Capita")
-    # 1:1 guideline (scaled to visible range)
-    if not pair.empty:
-        x_min, x_max = pair["Total"].min(), pair["Total"].max()
-        y_min, y_max = pair["PerCapita"].min(), pair["PerCapita"].max()
-        slope = (y_max - y_min) / (x_max - x_min) if x_max > x_min else 0
     st.plotly_chart(fig_pair, use_container_width=True)
 
 # -------------------------------------------------
