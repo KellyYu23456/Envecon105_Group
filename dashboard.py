@@ -229,7 +229,7 @@ with st.spinner("Loading data from GitHub…"):
     co2_long["Indicator"] = "CO2 Emissions (Metric Tons)"
 
     # Temperature for China (robust reader)
-    temperature_cn = read_china_temperature(RAW_URLS["temp_xlsx"])
+    temperature_cn = load_china_temperature(RAW_URLS["temp_xlsx"])
 
     # Disasters for China – collapse all numeric columns to total per year
     dis_cn_raw = read_excel_from_url(RAW_URLS["disasters_xlsx"])
