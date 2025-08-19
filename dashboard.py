@@ -361,89 +361,142 @@ with tab2:
     st.plotly_chart(fig3, use_container_width=True)
 
 # -------------------------------------------------
+# -------------------------------------------------
 # Tab 3: China Deep-dive
 # -------------------------------------------------
 with tab3:
     st.markdown("## China Deep-dive: Emissions, Temperature & Relationships")
 
-    # Make sure Year is Int64 on both series (prevents float/int mismatch)
-    c_em = co2_long[co2_long["Country"] == "China"][["Year", "Value"]].rename(columns={"Value": "Emissions"}).copy()
-    c_em["Year"] = pd.to_numeric(c_em["Year"], errors="coerce").astype("Int64")
-    c_temp = temperature_cn[["Year", "Value"]].rename(columns={"Value": "Temperature_F"}).copy()
-    c_temp["Year"] = pd.to_numeric(c_temp["Year"], errors="coerce").astype("Int64")
+    # Prepare series (China) and make sure Year is numeric int (dropping NA)
+    c_em = (
+        co2_long.loc[co2_long["Country"] == "China", ["Year", "Value"]]
+        .rename(columns={"Value": "Emissions"})
+        .copy()
+    )
+    c_em["Year"] = pd.to_numeric(c_em["Year"], errors="coerce")
+    c_em = c_em.dropna(subset=["Year"])
+    c_em["Year"] = c_em["Year"].astype(int)
 
-    # Compute the overlap with the slider
-    if not c_em.empty and not c_temp.empty:
-        overlap_min = max(c_em["Year"].min(), c_temp["Year"].min(), pd.Series([year_range[0]], dtype="Int64").iloc[0])
-        overlap_max = min(c_em["Year"].max(), c_temp["Year"].max(), pd.Series([year_range[1]], dtype="Int64").iloc[0])
-    else:
-        overlap_min, overlap_max = None, None
+    c_temp = (
+        temperature_cn[["Year", "Value"]]
+        .rename(columns={"Value": "Temperature_F"})
+        .copy()
+    )
+    c_temp["Year"] = pd.to_numeric(c_temp["Year"], errors="coerce")
+    c_temp = c_temp.dropna(subset=["Year"])
+    c_temp["Year"] = c_temp["Year"].astype(int)
 
-    if overlap_min is not None and overlap_max is not None and overlap_min <= overlap_max:
-        in_overlap = (c_em["Year"] >= overlap_min) & (c_em["Year"] <= overlap_max)
-        c_em_clip = c_em[in_overlap].copy()
-        in_overlap_t = (c_temp["Year"] >= overlap_min) & (c_temp["Year"] <= overlap_max)
-        c_temp_clip = c_temp[in_overlap_t].copy()
-        merged = pd.merge(c_em_clip, c_temp_clip, on="Year", how="inner")
-    else:
-        merged = pd.DataFrame(columns=["Year", "Emissions", "Temperature_F"])
+    # If either table is empty, explain clearly and stop.
+    if c_em.empty or c_temp.empty:
+        st.info(
+            f"Emissions rows (China): {len(c_em)} "
+            f"({'' if c_em.empty else f'{c_em['Year'].min()}–{c_em['Year'].max()}'}),  "
+            f"Temperature rows: {len(c_temp)} "
+            f"({'' if c_temp.empty else f'{c_temp['Year'].min()}–{c_temp['Year'].max()}'}).  "
+            "One of them is empty — nothing to plot."
+        )
+        st.stop()
+
+    # True data overlap between emissions and temperature
+    overlap_lo = max(c_em["Year"].min(), c_temp["Year"].min())
+    overlap_hi = min(c_em["Year"].max(), c_temp["Year"].max())
+
+    # Clip by the slider (still respects your year_range control)
+    clip_lo = max(overlap_lo, int(year_range[0]))
+    clip_hi = min(overlap_hi, int(year_range[1]))
+
+    # If slider excludes the overlap, explain exactly what to pick
+    if clip_lo > clip_hi:
+        st.info(
+            f"No overlapping years between emissions and temperature *within your selected range* "
+            f"{year_range[0]}–{year_range[1]}. "
+            f"Data overlap is **{overlap_lo}–{overlap_hi}**. "
+            f"Move the slider to include any part of that interval."
+        )
+        st.stop()
+
+    # Filter to the effective overlap
+    c_em_clip = c_em[(c_em["Year"] >= clip_lo) & (c_em["Year"] <= clip_hi)].copy()
+    c_temp_clip = c_temp[(c_temp["Year"] >= clip_lo) & (c_temp["Year"] <= clip_hi)].copy()
+    merged = pd.merge(c_em_clip, c_temp_clip, on="Year", how="inner").sort_values("Year")
 
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("#### CO₂ Emissions (China)")
-        if not merged.empty:
-            fig_e = px.line(merged, x="Year", y="Emissions")
-            if show_smoothed and window > 1:
-                ms = merged.sort_values("Year")
-                ms["Smoothed"] = ms["Emissions"].rolling(window, center=True, min_periods=1).mean()
-                fig_e.add_scatter(x=ms["Year"], y=ms["Smoothed"], mode="lines", name="Smoothed")
-            st.plotly_chart(fig_e, use_container_width=True)
-        else:
-            st.info("No overlapping years between emissions and the selected range.")
+        fig_e = px.line(merged, x="Year", y="Emissions")
+        if show_smoothed and window > 1:
+            ms = merged.copy()
+            ms["Smoothed"] = ms["Emissions"].rolling(window, center=True, min_periods=1).mean()
+            fig_e.add_scatter(x=ms["Year"], y=ms["Smoothed"], mode="lines", name="Smoothed")
+        st.plotly_chart(fig_e, use_container_width=True)
 
     with col2:
         st.markdown("#### Temperature (°F, China)")
-        if not merged.empty:
-            fig_t = px.line(merged, x="Year", y="Temperature_F")
-            if show_smoothed and window > 1:
-                ms = merged.sort_values("Year")
-                ms["Smoothed"] = ms["Temperature_F"].rolling(window, center=True, min_periods=1).mean()
-                fig_t.add_scatter(x=ms["Year"], y=ms["Smoothed"], mode="lines", name="Smoothed")
-            st.plotly_chart(fig_t, use_container_width=True)
-        else:
-            st.info("No overlapping years between temperature and the selected range.")
+        fig_t = px.line(merged, x="Year", y="Temperature_F")
+        if show_smoothed and window > 1:
+            ms = merged.copy()
+            ms["Smoothed"] = ms["Temperature_F"].rolling(window, center=True, min_periods=1).mean()
+            fig_t.add_scatter(x=ms["Year"], y=ms["Smoothed"], mode="lines", name="Smoothed")
+        st.plotly_chart(fig_t, use_container_width=True)
 
     st.markdown("### Scaled Temperature vs CO₂ Emissions (China)")
     if len(merged) >= 3:
         scaler = StandardScaler()
         XY = scaler.fit_transform(merged[["Emissions", "Temperature_F"]])
         x, y = XY[:, 0], XY[:, 1]
+
         m, b = np.polyfit(x, y, 1)
         xs = np.linspace(x.min(), x.max(), 200)
         ys = b + m * xs
-        fig_sc = px.scatter(x=x, y=y, labels={"x": "Scaled Emissions", "y": "Scaled Temperature"},
-                            title=f"China CO₂ Emissions vs Temperature ({int(merged['Year'].min())}–{int(merged['Year'].max())})")
+
+        fig_sc = px.scatter(
+            x=x, y=y,
+            labels={"x": "Scaled Emissions", "y": "Scaled Temperature"},
+            title=f"China CO₂ Emissions vs Temperature ({merged['Year'].min()}–{merged['Year'].max()})"
+        )
         fig_sc.add_scatter(x=xs, y=ys, mode="lines", name="Fit")
         st.plotly_chart(fig_sc, use_container_width=True)
     else:
         st.info("Not enough overlapping years to plot the scaled scatter.")
 
     st.markdown("### CO₂ per Capita vs Total CO₂ (China)")
-    c_total = co2_long[co2_long["Country"] == "China"][["Year", "Value"]].rename(columns={"Value": "Total"}).copy()
-    c_total["Year"] = pd.to_numeric(c_total["Year"], errors="coerce").astype("Int64")
-    c_pc = co2_pc_long[co2_pc_long["Country"] == "China"][["Year", "Value"]].rename(columns={"Value": "PerCapita"}).copy()
-    c_pc["Year"] = pd.to_numeric(c_pc["Year"], errors="coerce").astype("Int64")
-    # intersect with the same overlap range we computed
-    if overlap_min is not None and overlap_max is not None and overlap_min <= overlap_max:
-        c_total = c_total[(c_total["Year"] >= overlap_min) & (c_total["Year"] <= overlap_max)]
-        c_pc = c_pc[(c_pc["Year"] >= overlap_min) & (c_pc["Year"] <= overlap_max)]
+    c_total = (
+        co2_long.loc[co2_long["Country"] == "China", ["Year", "Value"]]
+        .rename(columns={"Value": "Total"})
+        .copy()
+    )
+    c_total["Year"] = pd.to_numeric(c_total["Year"], errors="coerce")
+    c_total = c_total.dropna(subset=["Year"])
+    c_total["Year"] = c_total["Year"].astype(int)
+
+    c_pc = (
+        co2_pc_long.loc[co2_pc_long["Country"] == "China", ["Year", "Value"]]
+        .rename(columns={"Value": "PerCapita"})
+        .copy()
+    )
+    c_pc["Year"] = pd.to_numeric(c_pc["Year"], errors="coerce")
+    c_pc = c_pc.dropna(subset=["Year"])
+    c_pc["Year"] = c_pc["Year"].astype(int)
+
+    # Restrict to the same effective overlap we used above
+    c_total = c_total[(c_total["Year"] >= clip_lo) & (c_total["Year"] <= clip_hi)]
+    c_pc = c_pc[(c_pc["Year"] >= clip_lo) & (c_pc["Year"] <= clip_hi)]
+
     pair = pd.merge(c_total, c_pc, on="Year", how="inner")
     if not pair.empty:
         fig_pair = px.scatter(
             pair, x="Total", y="PerCapita", color="Year",
             labels={"Total": "Total CO₂ (metric tons)", "PerCapita": "CO₂ per Capita (tonnes/person)"},
-            title="China: CO₂ Total vs CO₂ per Capita",
+            title=f"China: CO₂ Total vs CO₂ per Capita ({pair['Year'].min()}–{pair['Year'].max()})"
         )
+        # simple line fit (no statsmodels)
+        x = pair["Total"].to_numpy()
+        y = pair["PerCapita"].to_numpy()
+        if len(pair) >= 2 and np.isfinite(x).all() and np.isfinite(y).all():
+            m, b = np.polyfit(x, y, 1)
+            xs = np.linspace(x.min(), x.max(), 200)
+            ys = b + m * xs
+            fig_pair.add_scatter(x=xs, y=ys, mode="lines", name="Fit")
         st.plotly_chart(fig_pair, use_container_width=True)
     else:
         st.info("No overlapping years for Total vs Per-Capita within the selected range.")
