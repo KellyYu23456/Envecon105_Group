@@ -3,6 +3,7 @@
 
 import io
 import zipfile
+import re
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -125,52 +126,75 @@ def _find_year_and_numeric(df: pd.DataFrame) -> Tuple[Optional[str], List[str]]:
 
 
 @st.cache_data(show_spinner=False)
-def read_china_temperature(url: str) -> pd.DataFrame:
+@st.cache_data(show_spinner=False)
+def load_china_temperature(url: str) -> pd.DataFrame:
     """
-    Load temperature Excel that may have metadata/preambles/sheets.
-    Heuristics: scan sheets + skiprows, find Year + numeric columns, average to annual mean.
-    Returns: columns = [Country, Year, Indicator, Value] with Value in °F.
+    Read the China CRU temperature Excel like your project code:
+    - skip metadata rows
+    - pick columns that look like YYYY or YYYY-MM
+    - melt wide->long, extract 4-digit year
+    - average across months if needed
+    - convert °C to °F
+    Returns long table with columns: Country, Year, Indicator, Value (°F)
     """
-    content = _http_get(url)
-    xf = pd.ExcelFile(io.BytesIO(content))
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    wide = pd.read_excel(io.BytesIO(r.content), skiprows=4, na_values=["-99"])
 
-    tried = 0
-    for sheet in xf.sheet_names:
-        for skip in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]:
-            try:
-                raw = pd.read_excel(xf, sheet_name=sheet, skiprows=skip)
-            except Exception:
-                continue
-            if raw is None or raw.empty or raw.shape[1] < 1:
-                continue
+    # normalize column names to strings
+    wide.columns = [str(c).strip() for c in wide.columns]
 
-            year_col, num_cols = _find_year_and_numeric(raw)
-            if not year_col or not num_cols:
-                continue
+    # pick columns that look like year or year-month, e.g. 1901 or 1901-01
+    year_cols = [
+        c for c in wide.columns
+        if isinstance(c, str) and re.match(r"^\d{4}(-\d{1,2})?$", c)
+    ]
 
-            tmp = raw[[year_col] + num_cols].copy()
-            tmp = _normalize_cols(tmp).rename(columns={year_col: "Year"})
-            tmp["Year"] = pd.to_numeric(tmp["Year"], errors="coerce")
+    # some files only have monthly keys with different formats; be permissive fallback
+    if not year_cols:
+        year_cols = [c for c in wide.columns if re.search(r"\d{4}", c or "")]
 
-            # Average across any numeric columns (handles single-series and multi-series tables)
-            numeric_frame = pd.concat([pd.to_numeric(tmp[c], errors="coerce") for c in num_cols], axis=1)
-            tmp["Temperature_C"] = numeric_frame.mean(axis=1, skipna=True)
-            tmp = tmp.dropna(subset=["Year", "Temperature_C"])
+    # keep only ID columns that actually exist (as in your notebook)
+    id_vars = [c for c in ["code", "name"] if c in wide.columns]
 
-            if tmp.empty:
-                continue
+    # melt wide -> long, values are in Celsius
+    long_c = (
+        wide.melt(
+            id_vars=id_vars,
+            value_vars=year_cols,
+            var_name="DateKey",
+            value_name="Temperature_C",
+        )
+        .dropna(subset=["Temperature_C"])
+    )
 
-            out = tmp[["Year", "Temperature_C"]].copy()
-            out["Country"] = "China"
-            out["Indicator"] = "Temperature"
-            out["Value"] = out["Temperature_C"] * 9.0 / 5.0 + 32.0  # C → F
-            out = out[["Country", "Year", "Indicator", "Value"]]
-            return out
+    # derive Year from the column name (first 4 digits)
+    # (works for 1901, 1901-01, 01/1901-like keys, etc.)
+    long_c["Year"] = (
+        long_c["DateKey"]
+        .astype(str)
+        .str.extract(r"(\d{4})")
+        .astype(int)
+    )
 
-            tried += 1
+    # average to annual, convert to Fahrenheit, standardize columns
+    temperature = (
+        long_c.groupby("Year", as_index=False)["Temperature_C"]
+        .mean()
+        .assign(
+            Country="China",
+            Indicator="Temperature",
+            Value=lambda d: d["Temperature_C"] * 9 / 5 + 32,
+        )[["Country", "Year", "Indicator", "Value"]]
+        .sort_values("Year")
+        .reset_index(drop=True)
+    )
 
-    # Nothing workable found
-    return pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
+    return temperature
+
+
+# --- build temperature_cn using the function above ---
+temperature_cn = load_china_temperature(RAW_URLS["temp_xlsx"])
 
 
 # -------------------------------
