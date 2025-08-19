@@ -127,74 +127,136 @@ def _find_year_and_numeric(df: pd.DataFrame) -> Tuple[Optional[str], List[str]]:
 
 @st.cache_data(show_spinner=False)
 @st.cache_data(show_spinner=False)
-def load_china_temperature(url: str) -> pd.DataFrame:
+def load_china_temperature_flexible(url: str) -> pd.DataFrame:
     """
-    Read the China CRU temperature Excel like your project code:
-    - skip metadata rows
-    - pick columns that look like YYYY or YYYY-MM
-    - melt wide->long, extract 4-digit year
-    - average across months if needed
-    - convert °C to °F
-    Returns long table with columns: Country, Year, Indicator, Value (°F)
+    Try multiple header offsets and two parsing strategies:
+      A) Wide columns contain year-like tokens (e.g., 1901, 1901-01, Jan-1901, 1901.01)
+         -> melt -> extract 4-digit year -> annual mean
+      B) There is a 'Year' column and several numeric month columns
+         -> rowwise mean -> annual series
+    Returns a long table with: Country, Year, Indicator, Value (°F).
     """
-    r = requests.get(url, timeout=60)
-    r.raise_for_status()
-    wide = pd.read_excel(io.BytesIO(r.content), skiprows=4, na_values=["-99"])
+    # fetch once
+    resp = requests.get(url, timeout=60)
+    resp.raise_for_status()
+    raw_bytes = io.BytesIO(resp.content)
 
-    # normalize column names to strings
-    wide.columns = [str(c).strip() for c in wide.columns]
+    na_vals = ["-99", "-99.0", "-99.9", -99, -99.0, -99.9]
 
-    # pick columns that look like year or year-month, e.g. 1901 or 1901-01
-    year_cols = [
-        c for c in wide.columns
-        if isinstance(c, str) and re.match(r"^\d{4}(-\d{1,2})?$", c)
-    ]
-
-    # some files only have monthly keys with different formats; be permissive fallback
-    if not year_cols:
-        year_cols = [c for c in wide.columns if re.search(r"\d{4}", c or "")]
-
-    # keep only ID columns that actually exist (as in your notebook)
-    id_vars = [c for c in ["code", "name"] if c in wide.columns]
-
-    # melt wide -> long, values are in Celsius
-    long_c = (
-        wide.melt(
-            id_vars=id_vars,
-            value_vars=year_cols,
-            var_name="DateKey",
-            value_name="Temperature_C",
+    def _standardize(temp_c_annual: pd.DataFrame) -> pd.DataFrame:
+        if temp_c_annual is None or temp_c_annual.empty:
+            return pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
+        temp_c_annual = temp_c_annual.dropna(subset=["Year", "Temperature_C"]).copy()
+        if temp_c_annual.empty:
+            return pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
+        out = (
+            temp_c_annual.assign(
+                Country="China",
+                Indicator="Temperature",
+                Value=lambda d: d["Temperature_C"] * 9.0 / 5.0 + 32.0,
+            )[["Country", "Year", "Indicator", "Value"]]
+            .sort_values("Year")
+            .reset_index(drop=True)
         )
-        .dropna(subset=["Temperature_C"])
-    )
+        return out
 
-    # derive Year from the column name (first 4 digits)
-    # (works for 1901, 1901-01, 01/1901-like keys, etc.)
-    long_c["Year"] = (
-        long_c["DateKey"]
-        .astype(str)
-        .str.extract(r"(\d{4})")
-        .astype(int)
-    )
+    def parse_wide_year_columns(df: pd.DataFrame) -> pd.DataFrame | None:
+        cols = list(df.columns)
+        # Keep strings for detection but remember original names to avoid collisions later
+        str_cols = [str(c).strip() for c in cols]
 
-    # average to annual, convert to Fahrenheit, standardize columns
-    temperature = (
-        long_c.groupby("Year", as_index=False)["Temperature_C"]
-        .mean()
-        .assign(
-            Country="China",
-            Indicator="Temperature",
-            Value=lambda d: d["Temperature_C"] * 9 / 5 + 32,
-        )[["Country", "Year", "Indicator", "Value"]]
-        .sort_values("Year")
-        .reset_index(drop=True)
-    )
+        # columns that contain a 4-digit year anywhere (very permissive)
+        year_like = []
+        for orig, sc in zip(cols, str_cols):
+            # reject obvious id cols
+            if sc.lower() in {"code", "name", "country", "iso3", "notes"}:
+                continue
+            if re.search(r"(18|19|20)\d{2}", sc):
+                year_like.append(orig)
 
-    return temperature
+        # Heuristic: need several yearish columns to treat as wide
+        if len(year_like) < 6:
+            return None
+
+        id_vars = [c for c in cols if c not in year_like]
+
+        long_c = (
+            df.melt(
+                id_vars=id_vars,
+                value_vars=year_like,
+                var_name="DateKey",
+                value_name="Temperature_C",
+            )
+            .replace({np.inf: np.nan, -np.inf: np.nan})
+            .dropna(subset=["Temperature_C"])
+        )
+
+        # extract 4-digit year from DateKey (works for 1901, 1901-01, Jan-1901, 1901.01, etc.)
+        years = (
+            long_c["DateKey"]
+            .astype(str)
+            .str.extract(r"((?:18|19|20)\d{2})")[0]
+        )
+        if years.isna().all():
+            return None
+
+        long_c["Year"] = pd.to_numeric(years, errors="coerce")
+        # annual mean across whatever sub-periods exist (months, etc.)
+        annual = (
+            long_c.groupby("Year", as_index=False)["Temperature_C"]
+            .mean(numeric_only=True)
+        )
+        return annual
+
+    def parse_row_year_months(df: pd.DataFrame) -> pd.DataFrame | None:
+        # find a Year column by name (case-insensitive)
+        year_col = None
+        for c in df.columns:
+            if str(c).strip().lower() == "year":
+                year_col = c
+                break
+        if year_col is None:
+            return None
+
+        # numeric columns (months or other numeric series)
+        num_cols = [c for c in df.columns if c != year_col and pd.api.types.is_numeric_dtype(df[c])]
+        if len(num_cols) < 3:
+            return None
+
+        tmp = df[[year_col] + num_cols].copy()
+        tmp["Year"] = pd.to_numeric(tmp[year_col], errors="coerce")
+        tmp["Temperature_C"] = tmp[num_cols].mean(axis=1, skipna=True)
+        annual = tmp[["Year", "Temperature_C"]].dropna(subset=["Year"])
+        return annual
+
+    # Try several skiprows; some CRU-like files have a 3–6 line preamble
+    for skip in [0, 1, 2, 3, 4, 5, 6]:
+        try:
+            raw_bytes.seek(0)
+            df = pd.read_excel(raw_bytes, skiprows=skip, na_values=na_vals)
+        except Exception:
+            continue
+
+        # Normalize and drop all-empty cols
+        df.columns = [str(c).strip() for c in df.columns]
+        df = df.dropna(axis=1, how="all")
+
+        # Strategy A: wide columns with year-like labels
+        annual_a = parse_wide_year_columns(df)
+        if annual_a is not None and not annual_a.empty:
+            return _standardize(annual_a)
+
+        # Strategy B: row-wise Year + (many) numeric columns
+        annual_b = parse_row_year_months(df)
+        if annual_b is not None and not annual_b.empty:
+            return _standardize(annual_b)
+
+    # Nothing worked
+    return pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
 
 
-# --- build temperature_cn using the function above ---
-temperature_cn = load_china_temperature(RAW_URLS["temp_xlsx"])
+# --- build temperature_cn using the flexible loader ---
+temperature_cn = load_china_temperature_flexible(RAW_URLS["temp_xlsx"])
 
 
 # -------------------------------
