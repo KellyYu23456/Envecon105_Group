@@ -126,7 +126,6 @@ def _find_year_and_numeric(df: pd.DataFrame) -> Tuple[Optional[str], List[str]]:
 
 
 @st.cache_data(show_spinner=False)
-@st.cache_data(show_spinner=False)
 def load_china_temperature_flexible(url: str) -> pd.DataFrame:
     """
     Try multiple header offsets and two parsing strategies:
