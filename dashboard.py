@@ -110,20 +110,40 @@ with st.spinner("Loading data from GitHub…"):
     co2_long = co2_long.dropna(subset=["Year"]).copy()
     co2_long["Indicator"] = "CO2 Emissions (Metric Tons)"
 
-    # Temperature China (°C -> °F), skiprows like notebook
-    temp_raw = read_excel_from_url(RAW_URLS["temp_xlsx"], skiprows=4, na_values=["-99"])
-    temp_norm, year_col, num_cols = normalize_year_numeric_table(temp_raw)
+    # --------- FIXED: Robust temperature loader (only this block changed) ----------
+    # Try several header offsets; accept annual or monthly columns; build annual °F.
     temperature_cn = pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
-    if year_col is not None and num_cols:
-        tmp = temp_norm[[year_col] + num_cols].rename(columns={year_col: "Year"})
+    for sr in [4, 3, 5, 2, 1, 0, 6]:
+        try:
+            temp_raw = read_excel_from_url(RAW_URLS["temp_xlsx"], skiprows=sr, na_values=["-99", -99])
+        except Exception:
+            continue
+        temp_norm, year_col, num_cols = normalize_year_numeric_table(temp_raw)
+        if year_col is None or not num_cols:
+            continue
+
+        # Prefer an 'Ann'/'Annual'/'Mean' column if present; else average numeric (e.g., months).
+        ann_cols = [c for c in num_cols if any(k in c.lower() for k in ["ann", "annual", "mean", "avg"])]
+        tmp = temp_norm[[year_col] + num_cols].rename(columns={year_col: "Year"}).copy()
         tmp["Year"] = pd.to_numeric(tmp["Year"], errors="coerce")
-        tmp["Temperature_C"] = tmp[num_cols].mean(axis=1, skipna=True)
+        if ann_cols:
+            # Use the first annual-like column
+            tmp["Temperature_C"] = pd.to_numeric(tmp[ann_cols[0]], errors="coerce")
+        else:
+            # Average across numeric columns (typical Jan..Dec)
+            tmp["Temperature_C"] = tmp[num_cols].mean(axis=1, skipna=True)
+
         tmp = tmp.dropna(subset=["Year", "Temperature_C"])
-        temperature_cn = tmp[["Year", "Temperature_C"]].copy()
-        temperature_cn["Country"] = "China"
-        temperature_cn["Indicator"] = "Temperature"
-        temperature_cn["Value"] = temperature_cn["Temperature_C"] * 9.0 / 5.0 + 32.0
-        temperature_cn = temperature_cn[["Country", "Year", "Indicator", "Value"]]
+        if tmp.empty:
+            continue
+
+        out = tmp[["Year", "Temperature_C"]].copy()
+        out["Country"] = "China"
+        out["Indicator"] = "Temperature"
+        out["Value"] = out["Temperature_C"] * 9.0 / 5.0 + 32.0  # °C -> °F
+        temperature_cn = out[["Country", "Year", "Indicator", "Value"]]
+        break
+    # -------------------------------------------------------------------------------
 
     # Disasters China
     dis_cn_raw = read_excel_from_url(RAW_URLS["disasters_xlsx"])
