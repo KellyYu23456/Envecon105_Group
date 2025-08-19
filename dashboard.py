@@ -302,87 +302,83 @@ with tab2:
         st.plotly_chart(fig3, use_container_width=True)
 
 # -------------------------------------------------
-# Tab 3: China Deep-dive – emissions & temperature
-# -------------------------------------------------
+# Tab 3: China Deep-dive
+# -------------------------------
 with tab3:
     st.markdown("## China Deep-dive: Emissions, Temperature & Relationships")
 
-    # --- pull China series
+    # --- Prepare China emissions & temperature and enforce overlap ---
     c_em = co2_long[co2_long["Country"] == "China"][["Year", "Value"]].rename(columns={"Value": "Emissions"}).copy()
-    c_tp = temperature_cn[["Year", "Value"]].rename(columns={"Value": "Temperature_F"}).copy()
+    c_temp = temperature_cn[["Year", "Value"]].rename(columns={"Value": "Temperature_F"}).copy()
+    if not c_em.empty:
+        c_em["Year"] = _coerce_year(c_em["Year"])
+    if not c_temp.empty:
+        c_temp["Year"] = _coerce_year(c_temp["Year"])
 
-    # --- coerce Year to integer and drop bad rows
-    for df_ in (c_em, c_tp):
-        df_["Year"] = pd.to_numeric(df_["Year"], errors="coerce")
-        df_.dropna(subset=["Year"], inplace=True)
-        df_["Year"] = df_["Year"].astype(int)
+    # First enforce overlap between the two series
+    em_ov, temp_ov, common_years = safe_overlap(c_em, c_temp, "Year")
 
-    # --- compute overlap with the selected range
-    yr_set = set(range(year_range[0], year_range[1] + 1))
-    em_years = set(c_em["Year"].tolist())
-    tp_years = set(c_tp["Year"].tolist())
-    common_years = sorted((em_years & tp_years) & yr_set)
+    # Then clip both to the selected year_range
+    em_range = em_ov[(em_ov["Year"] >= year_range[0]) & (em_ov["Year"] <= year_range[1])]
+    temp_range = temp_ov[(temp_ov["Year"] >= year_range[0]) & (temp_ov["Year"] <= year_range[1])]
 
-    # Panels: line plots with optional smoothing
+    # Panels
     col1, col2 = st.columns(2)
-
-    # CO2 line
     with col1:
         st.markdown("#### CO₂ Emissions (China)")
-        if not common_years:
+        if em_range.empty:
             st.info("No overlapping years between emissions and the selected range.")
         else:
-            em_show = c_em[c_em["Year"].isin(common_years)].sort_values("Year").set_index("Year")
-            ser = em_show[["Emissions"]].copy()
+            ser = em_range.set_index("Year").sort_index()
             if show_smoothed and window > 1:
                 ser["Smoothed"] = ser["Emissions"].rolling(window, center=True, min_periods=1).mean()
             st.line_chart(ser)
 
-    # Temperature line
     with col2:
         st.markdown("#### Temperature (°F, China)")
-        if not common_years:
+        if temp_range.empty:
             st.info("No overlapping years between temperature and the selected range.")
         else:
-            tp_show = c_tp[c_tp["Year"].isin(common_years)].sort_values("Year").set_index("Year")
-            ser = tp_show[["Temperature_F"]].copy()
+            ser = temp_range.set_index("Year").sort_index()
             if show_smoothed and window > 1:
                 ser["Smoothed"] = ser["Temperature_F"].rolling(window, center=True, min_periods=1).mean()
             st.line_chart(ser)
 
-    # Scaled scatter (only if we truly have overlap)
+    # Scaled scatter (requires overlap)
     st.markdown("### Scaled Temperature vs CO₂ Emissions (China)")
-    if len(common_years) < 3:
+    merged = pd.merge(em_range, temp_range, on="Year", how="inner")
+    if len(merged) < 3:
         st.info("Not enough overlapping years to plot the scaled scatter.")
     else:
-        merged = (c_em[c_em["Year"].isin(common_years)]
-                  .merge(c_tp[c_tp["Year"].isin(common_years)], on="Year", how="inner")
-                  .sort_values("Year"))
-        from sklearn.preprocessing import StandardScaler
+        # Standardize each axis
+        x = (merged["Emissions"] - merged["Emissions"].mean()) / (merged["Emissions"].std(ddof=0) or 1.0)
+        y = (merged["Temperature_F"] - merged["Temperature_F"].mean()) / (merged["Temperature_F"].std(ddof=0) or 1.0)
 
-        # numeric safety
-        merged["Emissions"] = pd.to_numeric(merged["Emissions"], errors="coerce")
-        merged["Temperature_F"] = pd.to_numeric(merged["Temperature_F"], errors="coerce")
-        merged = merged.dropna(subset=["Emissions", "Temperature_F"])
-        if len(merged) >= 3:
-            scaler = StandardScaler()
-            scaled = scaler.fit_transform(merged[["Emissions", "Temperature_F"]])
-            x, y = scaled[:, 0], scaled[:, 1]
+        # Simple regression line (no statsmodels)
+        m, b = np.polyfit(x, y, 1)
+        x_line = np.linspace(x.min(), x.max(), 200)
+        y_line = b + m * x_line
 
-            # regression line (numpy, no statsmodels dependency)
-            m, b = np.polyfit(x, y, 1)
-            x_line = np.linspace(x.min(), x.max(), 200)
-            y_line = b + m * x_line
+        fig_sc = px.scatter(x=x, y=y, labels={"x": "Scaled Emissions", "y": "Scaled Temperature"},
+                            title=f"China CO₂ Emissions vs Temperature (scaled, {year_range[0]}–{year_range[1]})")
+        fig_sc.add_traces(px.line(x=x_line, y=y_line).data)
+        st.plotly_chart(fig_sc, use_container_width=True)
 
-            fig_sc = px.scatter(
-                x=x, y=y,
-                labels={"x": "Scaled Emissions", "y": "Scaled Temperature"},
-                title=f"China CO₂ Emissions and Temperature ({common_years[0]}–{common_years[-1]})"
-            )
-            fig_sc.add_traces(px.line(x=x_line, y=y_line).data)
-            st.plotly_chart(fig_sc, use_container_width=True)
-        else:
-            st.info("Not enough non-missing points to draw the scatter.")
+    # Per-capita vs total
+    st.markdown("### CO₂ per Capita vs Total CO₂ (China)")
+    c_total = co2_long[co2_long["Country"] == "China"][["Year", "Value"]].rename(columns={"Value": "Total"})
+    c_pc = co2_pc_long[co2_pc_long["Country"] == "China"][["Year", "Value"]].rename(columns={"Value": "PerCapita"})
+    pair = pd.merge(c_total, c_pc, on="Year", how="inner")
+    pair = pair[(pair["Year"] >= year_range[0]) & (pair["Year"] <= year_range[1])]
+    if pair.empty:
+        st.info("No overlapping years between CO₂ total and per-capita in the selected range.")
+    else:
+        fig_pair = px.scatter(
+            pair, x="Total", y="PerCapita", color="Year",
+            labels={"Total": "Total CO₂ (metric tons)", "PerCapita": "CO₂ per Capita (tonnes/person)"},
+            title="China: CO₂ Total vs CO₂ per Capita"
+        )
+        st.plotly_chart(fig_pair, use_container_width=True)
 
 # -------------------------------
 # Tab 4: Per-Capita vs GDP Growth
