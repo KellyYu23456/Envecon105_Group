@@ -110,39 +110,56 @@ with st.spinner("Loading data from GitHub…"):
     co2_long = co2_long.dropna(subset=["Year"]).copy()
     co2_long["Indicator"] = "CO2 Emissions (Metric Tons)"
 
-    # --------- FIXED: Robust temperature loader (only this block changed) ----------
-    # Try several header offsets; accept annual or monthly columns; build annual °F.
+        # --------- Temperature China (robust: try all sheets + several headers) ----------
     temperature_cn = pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
-    for sr in [4, 3, 5, 2, 1, 0, 6]:
-        try:
-            temp_raw = read_excel_from_url(RAW_URLS["temp_xlsx"], skiprows=sr, na_values=["-99", -99])
-        except Exception:
-            continue
-        temp_norm, year_col, num_cols = normalize_year_numeric_table(temp_raw)
-        if year_col is None or not num_cols:
-            continue
 
-        # Prefer an 'Ann'/'Annual'/'Mean' column if present; else average numeric (e.g., months).
-        ann_cols = [c for c in num_cols if any(k in c.lower() for k in ["ann", "annual", "mean", "avg"])]
-        tmp = temp_norm[[year_col] + num_cols].rename(columns={year_col: "Year"}).copy()
-        tmp["Year"] = pd.to_numeric(tmp["Year"], errors="coerce")
-        if ann_cols:
-            # Use the first annual-like column
-            tmp["Temperature_C"] = pd.to_numeric(tmp[ann_cols[0]], errors="coerce")
-        else:
-            # Average across numeric columns (typical Jan..Dec)
-            tmp["Temperature_C"] = tmp[num_cols].mean(axis=1, skipna=True)
+    # download once so we can inspect multiple sheets
+    r_temp = requests.get(RAW_URLS["temp_xlsx"], timeout=60)
+    r_temp.raise_for_status()
+    bio = io.BytesIO(r_temp.content)
 
-        tmp = tmp.dropna(subset=["Year", "Temperature_C"])
-        if tmp.empty:
-            continue
+    # list sheets and try a few header offsets
+    xls = pd.ExcelFile(bio)
+    tried = False
+    for sheet in xls.sheet_names:
+        for sr in (4, 3, 5, 2, 1, 0, 6):
+            tried = True
+            try:
+                raw = pd.read_excel(io.BytesIO(r_temp.content), sheet_name=sheet,
+                                    skiprows=sr, na_values=["-99", -99])
+            except Exception:
+                continue
 
-        out = tmp[["Year", "Temperature_C"]].copy()
-        out["Country"] = "China"
-        out["Indicator"] = "Temperature"
-        out["Value"] = out["Temperature_C"] * 9.0 / 5.0 + 32.0  # °C -> °F
-        temperature_cn = out[["Country", "Year", "Indicator", "Value"]]
-        break
+            norm, year_col, num_cols = normalize_year_numeric_table(raw)
+            if year_col is None or not num_cols:
+                continue
+
+            # prefer an Annual/Mean column; otherwise average numeric columns (e.g., months)
+            ann_cols = [c for c in num_cols if any(k in c.lower() for k in ["ann", "annual", "mean", "avg"])]
+            tmp = norm[[year_col] + num_cols].rename(columns={year_col: "Year"}).copy()
+            tmp["Year"] = pd.to_numeric(tmp["Year"], errors="coerce")
+
+            if ann_cols:
+                tmp["Temperature_C"] = pd.to_numeric(tmp[ann_cols[0]], errors="coerce")
+            else:
+                tmp["Temperature_C"] = tmp[num_cols].mean(axis=1, skipna=True)
+
+            tmp = tmp.dropna(subset=["Year", "Temperature_C"])
+            if tmp.empty:
+                continue
+
+            out = tmp[["Year", "Temperature_C"]].copy()
+            out["Country"] = "China"
+            out["Indicator"] = "Temperature"
+            out["Value"] = out["Temperature_C"] * 9.0 / 5.0 + 32.0  # °C → °F
+            temperature_cn = out[["Country", "Year", "Indicator", "Value"]]
+            break  # stop after first successful parse
+        if not temperature_cn.empty:
+            break
+
+    # If still empty but we tried, leave it empty so Tab 3 shows the info banner
+    # --------------------------------------------------------------------------
+
     # -------------------------------------------------------------------------------
 
     # Disasters China
