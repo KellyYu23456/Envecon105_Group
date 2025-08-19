@@ -169,6 +169,8 @@ def load_china_temperature_from_cru(url: str) -> pd.DataFrame:
         .reset_index(drop=True)
     )
     return out
+# Use the loader
+temperature_cn = load_china_temperature_from_cru(RAW_URLS["temp_xlsx"])
 
 # -------------------------------
 # 2) Load & tidy
@@ -200,9 +202,6 @@ with st.spinner("Loading data from GitHub…"):
     co2_long["Value"] = pd.to_numeric(co2_long["Value"], errors="coerce") * 1000.0
     co2_long = co2_long.dropna(subset=["Year"]).copy()
     co2_long["Indicator"] = "CO2 Emissions (Metric Tons)"
-
-    # Use the loader
-    temperature_cn = load_china_temperature_from_cru(RAW_URLS["temp_xlsx"])
 
     # Disasters for China – collapse all numeric columns to total per year
     dis_cn_raw = read_excel_from_url(RAW_URLS["disasters_xlsx"])
