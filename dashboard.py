@@ -151,21 +151,61 @@ with st.spinner("Loading data from GitHub…"):
     co2_long["Value"] = pd.to_numeric(co2_long["Value"], errors="coerce") * 1000.0
     co2_long["Indicator"] = "CO2 Emissions (Metric Tons)"
 
-    # China temperature (°C) – Excel with metadata rows
-    temp_raw = read_excel_from_url(RAW_URLS["temp_xlsx"], skiprows=4, na_values=["-99"])
-    temp_raw, temp_year_col, temp_num_cols = normalize_year_and_numeric(temp_raw)
+   # ---------- CHINA TEMPERATURE (robust) ----------
+# Skip metadata rows; -99 means missing in this file.
+tmp = read_excel_from_url(RAW_URLS["temp_xlsx"], skiprows=4, na_values=["-99"])
+tmp = tmp.rename(columns=lambda c: str(c).strip())  # trim headers
 
-    if temp_year_col is None or not temp_num_cols:
+# 1) Find a 'Year' column (case/space-insensitive), or reset index if the index is Year-like
+year_col = None
+for c in tmp.columns:
+    if "year" in c.lower():
+        year_col = c
+        break
+if year_col is None and tmp.index.name and "year" in str(tmp.index.name).lower():
+    tmp = tmp.reset_index()
+    # after reset_index, the index column appears as a normal column
+    for c in tmp.columns:
+        if "year" in c.lower():
+            year_col = c
+            break
+
+# If still not found, try the very first column name if it looks like a year column
+if year_col is None and len(tmp.columns) > 0:
+    # heuristic: first column often is 'Year' even if oddly labeled
+    first = tmp.columns[0]
+    if tmp[first].dtype.kind in "iufc":  # numeric-like
+        year_col = first
+
+# Coerce and clean
+if year_col is not None:
+    tmp[year_col] = pd.to_numeric(tmp[year_col], errors="coerce")
+    tmp = tmp.dropna(subset=[year_col])
+    tmp[year_col] = tmp[year_col].astype(int)
+else:
+    # no year → bail with empty frame to keep app stable
+    temperature_cn = pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
+
+# Build annual mean if we have a year column
+if year_col is not None:
+    # keep only Year + numeric columns, drop all-empty columns
+    num_cols = [c for c in tmp.columns if c != year_col and pd.api.types.is_numeric_dtype(tmp[c])]
+    keep_cols = [year_col] + num_cols
+    tmp = tmp[keep_cols].dropna(how="all", axis=1)
+
+    if len(num_cols) == 0:
         temperature_cn = pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
     else:
-        # collapse multiple numeric columns to one series (mean)
-        tmp = temp_raw.copy()
-        tmp["Temperature_C"] = tmp[temp_num_cols].mean(axis=1, skipna=True)
-        temperature_cn = tmp[["Year", "Temperature_C"]].dropna().copy()
-        temperature_cn["Country"] = "China"
-        temperature_cn["Indicator"] = "Temperature"
-        temperature_cn["Value"] = temperature_cn["Temperature_C"] * 9 / 5 + 32
-        temperature_cn = temperature_cn[["Country", "Year", "Indicator", "Value"]]
+        out = pd.DataFrame({
+            "Year": tmp[year_col],
+            "Temperature_C": tmp[num_cols].mean(axis=1, skipna=True)
+        }).dropna(subset=["Temperature_C"])
+
+        # Convert °C → °F and standardize schema
+        out["Value"] = out["Temperature_C"] * 9 / 5 + 32
+        out["Country"] = "China"
+        out["Indicator"] = "Temperature"
+        temperature_cn = out[["Country", "Year", "Indicator", "Value"]]
 
     # China natural disasters (counts)
     dis_cn_raw = read_excel_from_url(RAW_URLS["disasters_xlsx"])
