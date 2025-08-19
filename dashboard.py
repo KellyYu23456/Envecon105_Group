@@ -151,87 +151,100 @@ with st.spinner("Loading data from GitHub…"):
     co2_long["Value"] = pd.to_numeric(co2_long["Value"], errors="coerce") * 1000.0
     co2_long["Indicator"] = "CO2 Emissions (Metric Tons)"
 
-   # ---------- CHINA TEMPERATURE (robust) ----------
-# Skip metadata rows; -99 means missing in this file.
-tmp = read_excel_from_url(RAW_URLS["temp_xlsx"], skiprows=4, na_values=["-99"])
-tmp = tmp.rename(columns=lambda c: str(c).strip())  # trim headers
+# ---------- Robust China temperature loader (°C → °F) ----------
+def load_china_temperature(url: str) -> pd.DataFrame:
+    # This matches the CRU file that has a few header rows and -99 for missing
+    df = read_excel_from_url(url, skiprows=4, na_values=["-99"])
 
-# 1) Find a 'Year' column (case/space-insensitive), or reset index if the index is Year-like
-year_col = None
-for c in tmp.columns:
-    if "year" in c.lower():
-        year_col = c
-        break
-if year_col is None and tmp.index.name and "year" in str(tmp.index.name).lower():
-    tmp = tmp.reset_index()
-    # after reset_index, the index column appears as a normal column
-    for c in tmp.columns:
+    # Normalize column names
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Find the year column (case/space-insensitive)
+    year_col = None
+    for c in df.columns:
         if "year" in c.lower():
             year_col = c
             break
 
-# If still not found, try the very first column name if it looks like a year column
-if year_col is None and len(tmp.columns) > 0:
-    # heuristic: first column often is 'Year' even if oddly labeled
-    first = tmp.columns[0]
-    if tmp[first].dtype.kind in "iufc":  # numeric-like
-        year_col = first
+    # If the file uses year as index
+    if year_col is None and df.index.name and "year" in str(df.index.name).lower():
+        df = df.reset_index()
+        year_col = df.columns[0]
 
-# Coerce and clean
-if year_col is not None:
-    tmp[year_col] = pd.to_numeric(tmp[year_col], errors="coerce")
-    tmp = tmp.dropna(subset=[year_col])
-    tmp[year_col] = tmp[year_col].astype(int)
-else:
-    # no year → bail with empty frame to keep app stable
-    temperature_cn = pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
+    if year_col is None:
+        # Give back an empty frame with the right schema
+        return pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
 
-# Build annual mean if we have a year column
-if year_col is not None:
-    # keep only Year + numeric columns, drop all-empty columns
-    num_cols = [c for c in tmp.columns if c != year_col and pd.api.types.is_numeric_dtype(tmp[c])]
-    keep_cols = [year_col] + num_cols
-    tmp = tmp[keep_cols].dropna(how="all", axis=1)
+    # Pick numeric columns as candidate temperature series and average them
+    num_cols = [c for c in df.columns if c != year_col and pd.api.types.is_numeric_dtype(df[c])]
+    if not num_cols:
+        return pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
 
-    if len(num_cols) == 0:
-        temperature_cn = pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
-    else:
-        out = pd.DataFrame({
-            "Year": tmp[year_col],
-            "Temperature_C": tmp[num_cols].mean(axis=1, skipna=True)
-        }).dropna(subset=["Temperature_C"])
+    out = df[[year_col] + num_cols].copy()
+    out.rename(columns={year_col: "Year"}, inplace=True)
+    out["Year"] = pd.to_numeric(out["Year"], errors="coerce")
+    out = out.dropna(subset=["Year"])
 
-        # Convert °C → °F and standardize schema
-        out["Value"] = out["Temperature_C"] * 9 / 5 + 32
-        out["Country"] = "China"
-        out["Indicator"] = "Temperature"
-        temperature_cn = out[["Country", "Year", "Indicator", "Value"]]
+    # Annual mean in °C, then convert to °F
+    out["Temperature_C"] = out[num_cols].mean(axis=1, skipna=True)
+    out["Value"] = out["Temperature_C"] * 9 / 5 + 32  # °F
+    out = out[["Year", "Value"]].dropna()
+    out["Country"] = "China"
+    out["Indicator"] = "Temperature"
+    return out[["Country", "Year", "Indicator", "Value"]]
 
-    # China natural disasters (counts)
-    dis_cn_raw = read_excel_from_url(RAW_URLS["disasters_xlsx"])
-    dis_cn_raw, dis_year_col, dis_num_cols = normalize_year_and_numeric(dis_cn_raw)
-    if dis_year_col and dis_num_cols:
-        dis_cn_raw["Value"] = dis_cn_raw[dis_num_cols].sum(axis=1, skipna=True)
-        disasters_cn = dis_cn_raw[["Year", "Value"]].dropna().copy()
-        disasters_cn["Country"] = "China"
-        disasters_cn["Indicator"] = "Disasters"
-        disasters_cn = disasters_cn[["Country", "Year", "Indicator", "Value"]]
-    else:
-        disasters_cn = pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
 
-# Unified long table
-data_long = pd.concat(
-    [
-        co2_long[["Country", "Year", "Indicator", "Value"]],
-        energy_long[["Country", "Year", "Indicator", "Value"]],
-        gdp_long[["Country", "Year", "Indicator", "Value"]],
-        co2_pc_long[["Country", "Year", "Indicator", "Value"]],
-        temperature_cn,
-        disasters_cn,
-    ],
-    ignore_index=True,
-)
-data_long["Region"] = np.where(data_long["Country"] == "China", "China", "Rest of the World")
+# ---------- Robust China disasters loader (sum across columns) ----------
+def load_china_disasters(url: str) -> pd.DataFrame:
+    raw = read_excel_from_url(url)
+    raw.columns = [str(c).strip() for c in raw.columns]
+
+    # Find or recover Year
+    if "Year" not in raw.columns:
+        maybe_year = [c for c in raw.columns if "year" in c.lower()]
+        if maybe_year:
+            raw.rename(columns={maybe_year[0]: "Year"}, inplace=True)
+
+    if "Year" not in raw.columns:
+        return pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
+
+    # Sum across all numeric columns except Year
+    num_cols = [c for c in raw.columns if c != "Year" and pd.api.types.is_numeric_dtype(raw[c])]
+    if not num_cols:
+        return pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
+
+    out = raw[["Year"] + num_cols].copy()
+    out["Year"] = pd.to_numeric(out["Year"], errors="coerce")
+    out = out.dropna(subset=["Year"])
+    out["Value"] = out[num_cols].sum(axis=1, skipna=True)
+    out = out[["Year", "Value"]].dropna()
+    out["Country"] = "China"
+    out["Indicator"] = "Disasters"
+    return out[["Country", "Year", "Indicator", "Value"]]
+
+
+# ---------- Call the loaders so the variables ALWAYS exist ----------
+temperature_cn = load_china_temperature(RAW_URLS["temp_xlsx"])
+disasters_cn   = load_china_disasters(RAW_URLS["disasters_xlsx"])
+
+# ---------- Build the unified long table safely ----------
+parts = [
+    co2_long[["Country", "Year", "Indicator", "Value"]],
+    energy_long[["Country", "Year", "Indicator", "Value"]],
+    gdp_long[["Country", "Year", "Indicator", "Value"]],
+    co2_pc_long[["Country", "Year", "Indicator", "Value"]],
+    temperature_cn,   # may be empty, and that's OK
+    disasters_cn      # may be empty, and that's OK
+]
+
+# Make sure everything has the right columns
+parts = [p for p in parts if isinstance(p, pd.DataFrame) and set(p.columns) == {"Country", "Year", "Indicator", "Value"}]
+
+data_long = pd.concat(parts, ignore_index=True)
+
+# Region flag for comparisons
+if "Region" not in data_long.columns:
+    data_long["Region"] = np.where(data_long["Country"] == "China", "China", "Rest of the World")
 
 # -----------------------------------
 # 2) Sidebar controls
