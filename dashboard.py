@@ -385,26 +385,48 @@ with tab3:
 # -------------------------------
 with tab4:
     st.markdown("## Per-Capita Emissions vs GDP per Capita Growth (China)")
+
+    # Prepare inputs
     china_gdp = gdp_long[gdp_long["Country"] == "China"][["Year", "Value"]].rename(columns={"Value": "GDP_Growth"})
-    china_pc = co2_pc_long[co2_pc_long["Country"] == "China"][["Year", "Value"]].rename(columns={"Value": "PerCapita"})
+    china_pc  = co2_pc_long[co2_pc_long["Country"] == "China"][["Year", "Value"]].rename(columns={"Value": "PerCapita"})
 
-    china_gdp["Year"] = _coerce_year(china_gdp["Year"])
-    china_pc["Year"] = _coerce_year(china_pc["Year"])
+    # Coerce years to int
+    if not china_gdp.empty:
+        china_gdp["Year"] = pd.to_numeric(china_gdp["Year"], errors="coerce").dropna().astype(int)
+    if not china_pc.empty:
+        china_pc["Year"]  = pd.to_numeric(china_pc["Year"], errors="coerce").dropna().astype(int)
 
-    gg, _, common = safe_overlap(china_gdp, china_pc, "Year")
-    gg = gg[(gg["Year"] >= year_range[0]) & (gg["Year"] <= year_range[1])]
-    if gg.empty:
-        st.info("No overlapping data for the selected range.")
+    # Enforce overlap first, then merge so we have BOTH columns
+    g1, g2, common = safe_overlap(china_gdp, china_pc, "Year")
+
+    if not common:
+        st.info("No overlapping data between GDP growth and CO₂ per capita.")
     else:
-        # We draw without 'trendline=ols' to avoid statsmodels dependency
-        fig4 = px.scatter(
-            gg, x="GDP_Growth", y="PerCapita", color="Year",
-            labels={"GDP_Growth": "GDP per Capita Growth (%)",
-                    "PerCapita": "CO₂ per Capita (tonnes/person)"},
-            title=f"China: CO₂ per Capita vs GDP per Capita Growth ({year_range[0]}–{year_range[1]})"
-        )
-        st.plotly_chart(fig4, use_container_width=True)
+        gg = pd.merge(g1, g2, on="Year", how="inner")
+        # clip to selected year range
+        gg = gg[(gg["Year"] >= year_range[0]) & (gg["Year"] <= year_range[1])].copy()
 
+        # make sure plotting columns are numeric and drop rows that are NaN
+        gg["GDP_Growth"] = pd.to_numeric(gg["GDP_Growth"], errors="coerce")
+        gg["PerCapita"]  = pd.to_numeric(gg["PerCapita"],  errors="coerce")
+        gg = gg.dropna(subset=["GDP_Growth", "PerCapita"])
+
+        if gg.empty:
+            st.info("No overlapping data for the selected year range.")
+        else:
+            fig4 = px.scatter(
+                gg,
+                x="GDP_Growth",
+                y="PerCapita",
+                color="Year",
+                labels={
+                    "GDP_Growth": "GDP per Capita Growth (%)",
+                    "PerCapita": "CO₂ per Capita (tonnes/person)",
+                },
+                # no trendline to avoid statsmodels dependency
+                title=f"China: CO₂ per Capita vs GDP per Capita Growth ({year_range[0]}–{year_range[1]})",
+            )
+            st.plotly_chart(fig4, use_container_width=True)
 # -------------------------------
 # Footer
 # -------------------------------
