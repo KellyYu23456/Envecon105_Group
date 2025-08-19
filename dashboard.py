@@ -81,7 +81,124 @@ def normalize_year_numeric_table(df: pd.DataFrame):
     if year_col and year_col in numeric_cols:
         numeric_cols.remove(year_col)
     return df, year_col, numeric_cols
+def load_china_temperature_excel(url: str) -> pd.DataFrame:
+    """
+    Robust loader for CRU-like temperature workbooks.
+    - Tries all sheets
+    - Finds the header row that contains 'Year' + either 'Mean/Annual' or months
+    - Builds a yearly series (°F). Uses 'Mean/Annual' if present; else averages months.
+    Returns long df: [Country, Year, Indicator='Temperature', Value (°F)]
+    """
+    # download once so we can inspect multiple sheets / headers
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    bio = io.BytesIO(r.content)
 
+    months = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"]
+    xls = pd.ExcelFile(bio)
+
+    def _coerce_header_cells(x):
+        return [str(v).strip() for v in x]
+
+    for sheet in xls.sheet_names:
+        # read sheet without header so we can detect the header row
+        try:
+            raw = pd.read_excel(io.BytesIO(r.content), sheet_name=sheet, header=None)
+        except Exception:
+            continue
+        if raw.empty:
+            continue
+
+        # search the first ~30 rows for a header row that has 'year' and (mean/annual or months)
+        header_row = None
+        use_months = False
+        use_mean = False
+        mean_like_col = None
+
+        max_scan = min(30, len(raw))
+        for ridx in range(max_scan):
+            row_vals = _coerce_header_cells(list(raw.iloc[ridx].values))
+            row_lower = [v.lower() for v in row_vals]
+            if any("year" == v for v in row_lower):
+                # check if we have an annual/mean column or months
+                has_mean = any(any(k in v for k in ["mean", "annual", "ann"]) for v in row_lower)
+                has_months = sum(1 for v in row_lower for m in months if v.startswith(m)) >= 4  # enough months
+                if has_mean or has_months:
+                    header_row = ridx
+                    use_months = has_months
+                    use_mean = has_mean
+                    if use_mean:
+                        # pick the first 'mean/annual' like column
+                        for v in row_lower:
+                            if any(k in v for k in ["mean", "annual", "ann"]):
+                                mean_like_col = v
+                                break
+                    break
+
+        if header_row is None:
+            continue  # try next sheet
+
+        # reframe with detected header
+        df = raw.iloc[header_row+1:].copy()
+        cols = _coerce_header_cells(list(raw.iloc[header_row].values))
+        df.columns = cols
+
+        # find the year col (case-insensitive exact match or contains)
+        year_col = None
+        for c in df.columns:
+            if str(c).strip().lower() == "year" or "year" in str(c).strip().lower():
+                year_col = c
+                break
+        if year_col is None:
+            continue
+
+        # keep numeric columns
+        for c in df.columns:
+            if c != year_col:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+        df[year_col] = pd.to_numeric(df[year_col], errors="coerce")
+
+        if df[year_col].notna().sum() == 0:
+            continue
+
+        out = df[[year_col]].rename(columns={year_col: "Year"}).copy()
+
+        if use_mean and mean_like_col is not None:
+            # find the actual mean/annual column name (original case)
+            mean_candidates = [c for c in df.columns if c != year_col and any(k in str(c).lower() for k in ["mean","annual","ann"])]
+            if mean_candidates:
+                mcol = mean_candidates[0]
+                out["Temperature_C"] = pd.to_numeric(df[mcol], errors="coerce")
+            else:
+                # fallback to months if we can't find the exact mean column
+                month_cols = [c for c in df.columns if any(str(c).lower().startswith(m) for m in months)]
+                if not month_cols:
+                    continue
+                out["Temperature_C"] = df[month_cols].mean(axis=1, skipna=True)
+        else:
+            # monthly average
+            month_cols = [c for c in df.columns if any(str(c).lower().startswith(m) for m in months)]
+            if not month_cols:
+                # as a last resort average all numeric columns except Year
+                num_cols = [c for c in df.columns if c != year_col and pd.api.types.is_numeric_dtype(df[c])]
+                if not num_cols:
+                    continue
+                out["Temperature_C"] = df[num_cols].mean(axis=1, skipna=True)
+            else:
+                out["Temperature_C"] = df[month_cols].mean(axis=1, skipna=True)
+
+        out = out.dropna(subset=["Year", "Temperature_C"])
+        if out.empty:
+            continue
+
+        out["Country"] = "China"
+        out["Indicator"] = "Temperature"
+        out["Value"] = out["Temperature_C"] * 9.0 / 5.0 + 32.0  # °C → °F
+        return out[["Country", "Year", "Indicator", "Value"]]
+
+    # nothing found → return empty; Tab 3 will show the info banner
+    return pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
+    
 # -------------------------------
 # 2) Load & tidy
 # -------------------------------
@@ -110,55 +227,8 @@ with st.spinner("Loading data from GitHub…"):
     co2_long = co2_long.dropna(subset=["Year"]).copy()
     co2_long["Indicator"] = "CO2 Emissions (Metric Tons)"
 
-        # --------- Temperature China (robust: try all sheets + several headers) ----------
-    temperature_cn = pd.DataFrame(columns=["Country", "Year", "Indicator", "Value"])
-
-    # download once so we can inspect multiple sheets
-    r_temp = requests.get(RAW_URLS["temp_xlsx"], timeout=60)
-    r_temp.raise_for_status()
-    bio = io.BytesIO(r_temp.content)
-
-    # list sheets and try a few header offsets
-    xls = pd.ExcelFile(bio)
-    tried = False
-    for sheet in xls.sheet_names:
-        for sr in (4, 3, 5, 2, 1, 0, 6):
-            tried = True
-            try:
-                raw = pd.read_excel(io.BytesIO(r_temp.content), sheet_name=sheet,
-                                    skiprows=sr, na_values=["-99", -99])
-            except Exception:
-                continue
-
-            norm, year_col, num_cols = normalize_year_numeric_table(raw)
-            if year_col is None or not num_cols:
-                continue
-
-            # prefer an Annual/Mean column; otherwise average numeric columns (e.g., months)
-            ann_cols = [c for c in num_cols if any(k in c.lower() for k in ["ann", "annual", "mean", "avg"])]
-            tmp = norm[[year_col] + num_cols].rename(columns={year_col: "Year"}).copy()
-            tmp["Year"] = pd.to_numeric(tmp["Year"], errors="coerce")
-
-            if ann_cols:
-                tmp["Temperature_C"] = pd.to_numeric(tmp[ann_cols[0]], errors="coerce")
-            else:
-                tmp["Temperature_C"] = tmp[num_cols].mean(axis=1, skipna=True)
-
-            tmp = tmp.dropna(subset=["Year", "Temperature_C"])
-            if tmp.empty:
-                continue
-
-            out = tmp[["Year", "Temperature_C"]].copy()
-            out["Country"] = "China"
-            out["Indicator"] = "Temperature"
-            out["Value"] = out["Temperature_C"] * 9.0 / 5.0 + 32.0  # °C → °F
-            temperature_cn = out[["Country", "Year", "Indicator", "Value"]]
-            break  # stop after first successful parse
-        if not temperature_cn.empty:
-            break
-
-    # If still empty but we tried, leave it empty so Tab 3 shows the info banner
-    # --------------------------------------------------------------------------
+    # Temperature China (robust)
+    temperature_cn = load_china_temperature_excel(RAW_URLS["temp_xlsx"])
 
     # -------------------------------------------------------------------------------
 
