@@ -34,6 +34,27 @@ RAW_URLS = {
 # -------------------------------
 # 1) Helpers (FETCH + PARSE)
 # -------------------------------
+def add_linear_fit(fig, x, y, name="Fit"):
+    """Safely add a simple y = m*x + b fit line to a plotly figure.
+    Skips if data are non-finite, too short, or degenerate."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    mask = np.isfinite(x) & np.isfinite(y)
+    x = x[mask]
+    y = y[mask]
+
+    # need at least 2 points and non-zero variance for a stable fit
+    if len(x) >= 2 and np.nanstd(x) > 0 and np.nanstd(y) > 0:
+        try:
+            m, b = np.polyfit(x, y, 1)
+            xs = np.linspace(x.min(), x.max(), 200)
+            ys = b + m * xs
+            fig.add_scatter(x=xs, y=ys, mode="lines", name=name)
+        except np.linalg.LinAlgError:
+            # quietly skip adding a fit if the solver fails
+            pass
+    return fig
 
 def _http_get(url: str, timeout: int = 60) -> bytes:
     r = requests.get(url, timeout=timeout)
@@ -414,24 +435,26 @@ with tab3:
             st.info("No overlapping years between temperature and the selected range.")
 
     st.markdown("### Scaled Temperature vs CO₂ Emissions (China)")
-    if len(merged) >= 3:
+    
+    # Clean rows first to avoid NaN/inf before scaling
+    merged_for_scale = merged[["Emissions", "Temperature_F"]].replace([np.inf, -np.inf], np.nan).dropna()
+    
+    if len(merged_for_scale) >= 3:
         scaler = StandardScaler()
-        XY = scaler.fit_transform(merged[["Emissions", "Temperature_F"]])
+        XY = scaler.fit_transform(merged_for_scale[["Emissions", "Temperature_F"]])
         x, y = XY[:, 0], XY[:, 1]
-        # simple linear fit without statsmodels
-        m, b = np.polyfit(x, y, 1)
-        xs = np.linspace(x.min(), x.max(), 200)
-        ys = b + m * xs
-
-        fig_sc = px.scatter(
-            x=x, y=y,
-            labels={"x": "Scaled Emissions", "y": "Scaled Temperature"},
-            title=f"China CO₂ Emissions vs Temperature ({int(merged['Year'].min())}–{int(merged['Year'].max())})"
-        )
-        fig_sc.add_scatter(x=xs, y=ys, mode="lines", name="Fit")
+    
+        fig_sc = px.scatter(x=x, y=y,
+                            labels={"x": "Scaled Emissions", "y": "Scaled Temperature"},
+                            title=(f"China CO₂ Emissions vs Temperature "
+                                   f"({int(merged['Year'].min())}–{int(merged['Year'].max())})"))
+    
+        # add robust fit line (skips automatically if not possible)
+        fig_sc = add_linear_fit(fig_sc, x, y, name="Fit")
         st.plotly_chart(fig_sc, use_container_width=True)
     else:
         st.info("Not enough overlapping years to plot the scaled scatter.")
+
 
     st.markdown("### CO₂ per Capita vs Total CO₂ (China)")
     c_total = co2_long[co2_long["Country"] == "China"][["Year", "Value"]].rename(columns={"Value": "Total"}).copy()
@@ -477,18 +500,18 @@ with tab4:
     else:
         fig4 = px.scatter(
             gg, x="GDP_Growth", y="PerCapita", color="Year",
-            labels={"GDP_Growth": "GDP per Capita Growth (%)", "PerCapita": "CO₂ per Capita (tonnes/person)"},
+            labels={"GDP_Growth": "GDP per Capita Growth (%)",
+                    "PerCapita": "CO₂ per Capita (tonnes/person)"},
             title=f"China: CO₂ per Capita vs GDP per Capita Growth ({int(gg['Year'].min())}–{int(gg['Year'].max())})",
         )
-        # manual trendline (avoid statsmodels dependency)
+        
+        # Robust fit: filter to finite values and skip if degenerate
         x = gg["GDP_Growth"].to_numpy()
         y = gg["PerCapita"].to_numpy()
-        if len(gg) >= 2 and np.isfinite(x).all() and np.isfinite(y).all():
-            m, b = np.polyfit(x, y, 1)
-            xs = np.linspace(x.min(), x.max(), 200)
-            ys = b + m * xs
-            fig4.add_scatter(x=xs, y=ys, mode="lines", name="Fit")
+        fig4 = add_linear_fit(fig4, x, y, name="Fit")
+        
         st.plotly_chart(fig4, use_container_width=True)
+
 
 # -------------------------------
 # Footer
